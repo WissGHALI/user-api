@@ -1,0 +1,207 @@
+# User API – Mini-projet Spring Boot
+
+REST API that **generates** realistic users, **imports** them into an H2 database, **authenticates** them with a JWT and lets them **view profiles** according to their role.
+
+| | |
+|---|---|
+| Java | 17 or newer |
+| Framework | Spring Boot **4.1.1** (Spring Framework 7, Spring Security 7, Jackson 3) |
+| Build | Maven (wrapper included: `mvnw` / `mvnw.cmd`) |
+| Database | H2 in memory |
+| Fake data | [Datafaker](https://www.datafaker.net/) 2.5.4 |
+| JWT | Spring Security OAuth2 Resource Server (Nimbus JOSE), HS256 |
+| API docs | [springdoc-openapi](https://springdoc.org/) 3.1.0 (Swagger UI) |
+| Port | **9090** |
+
+---
+
+## 1. Running the project
+
+**Requirement: a JDK 17+** (`java -version`). Nothing else: no Maven install needed, no database, no environment variable, no configuration file to edit.
+
+```bash
+# Linux / macOS
+./mvnw spring-boot:run
+
+# Windows
+mvnw.cmd spring-boot:run
+```
+
+The first run downloads Maven (into `~/.m2/wrapper`) and the dependencies, which takes a minute or two. The app is ready when the log shows `Tomcat started on port 9090`.
+
+Alternative: build a jar and run it:
+
+```bash
+./mvnw clean package
+java -jar target/user-api-1.0.0.jar
+```
+
+If Maven is already installed, `mvn spring-boot:run` works too.
+
+### Useful URLs
+
+| What | URL |
+|---|---|
+| Swagger UI | http://localhost:9090/swagger-ui.html |
+| OpenAPI document | http://localhost:9090/v3/api-docs |
+| Generate 100 users (downloads `users.json`) | http://localhost:9090/api/users/generate?count=100 |
+
+### Running the tests
+
+```bash
+./mvnw test
+```
+
+---
+
+## 2. Testing everything from Swagger UI
+
+1. Open http://localhost:9090/swagger-ui.html
+2. **GET /api/users/generate**: *Try it out*, `count = 100`, *Execute*, then click **Download file**. You get `users.json`.
+3. **POST /api/users/batch**: *Try it out*, choose `users.json`, *Execute*. The response summarises the import:
+   ```json
+   { "total": 100, "imported": 100, "notImported": 0, "errors": [] }
+   ```
+   Upload the same file again: everything is rejected as a duplicate (`imported: 0`, `notImported: 100`).
+4. Open `users.json`, pick one user (preferably one with `"role": "admin"`) and note its `username` (or `email`) and `password`.
+5. **POST /api/auth**: send `{ "username": "<username or email>", "password": "<password>" }`. Copy the `accessToken` value.
+6. Click **Authorize** (padlock, top right), paste the token (without the word `Bearer`), *Authorize*.
+7. **GET /api/users/me**: returns your own profile.
+8. **GET /api/users/{username}**:
+   - with an **admin** token: any username returns that profile (404 if it doesn't exist);
+   - with a **user** token: your own username works, any other one returns **403**.
+
+### Same thing with curl
+
+```bash
+curl -OJ "http://localhost:9090/api/users/generate?count=100"
+curl -F "file=@users.json" http://localhost:9090/api/users/batch
+TOKEN=$(curl -s -H "Content-Type: application/json" \
+  -d '{"username":"<username>","password":"<password>"}' \
+  http://localhost:9090/api/auth | sed 's/.*"accessToken":"\([^"]*\)".*/\1/')
+curl -H "Authorization: Bearer $TOKEN" http://localhost:9090/api/users/me
+curl -H "Authorization: Bearer $TOKEN" http://localhost:9090/api/users/<other-username>
+```
+
+---
+
+## 3. Endpoints
+
+| # | Method | URL | Secured | Description |
+|---|---|---|---|---|
+| 1 | GET | `/api/users/generate?count=N` | no | Downloads `users.json` with N users (1 ≤ N ≤ 10 000) |
+| 2 | POST | `/api/users/batch` (multipart, field `file`) | no | Imports the file; returns `total`, `imported`, `notImported` and the reason for each rejection |
+| 3 | POST | `/api/auth` | no | `{username, password}` → `{ "accessToken": "..." }`; `username` can be the username **or** the email |
+| 4 | GET | `/api/users/me` | JWT | Profile of the token's owner |
+| 5 | GET | `/api/users/{username}` | JWT | Admin: any profile. User: own profile only (403 otherwise) |
+
+### Generated user (example)
+
+```json
+{
+  "firstName": "Camille",
+  "lastName": "Lefèvre",
+  "birthDate": "1987-03-21",
+  "city": "Toulouse",
+  "country": "FR",
+  "avatar": "https://i.pravatar.cc/300?img=32",
+  "company": "Garnier et Fils",
+  "jobPosition": "Chef de projet",
+  "mobile": "06 45 12 87 33",
+  "username": "camille.lefevre",
+  "email": "camille.lefevre27@gmail.com",
+  "password": "k7R#pz2Q",
+  "role": "user"
+}
+```
+
+### Error codes
+
+| Code | When |
+|---|---|
+| 400 | `count` missing, not a number or out of range; file missing, empty, not JSON or not a JSON array; login body incomplete |
+| 401 | Wrong credentials; missing, invalid or expired token |
+| 403 | A non-admin asks for another user's profile |
+| 404 | An admin asks for a username that doesn't exist |
+| 413 | Uploaded file larger than 20 MB |
+
+Errors are returned as RFC 9457 `application/problem+json`.
+
+---
+
+## 4. Design choices
+
+- **Realistic data.** For each user a country is chosen first (FR, US, GB, DE, ES, IT, NL, CA, AU, BR). The first name, last name, city and mobile number are then generated by Datafaker *for that country*, so a French user gets a French name, a French city and a French phone number, and `country` is that country's ISO 3166-1 alpha-2 code. Emails use real mail providers (gmail.com, outlook.com…), never `example.com`. Avatars are real photos from pravatar.cc. Ages are between 18 and 70.
+- **Password**: 6 to 10 random characters, always with at least one lower-case letter, one upper-case letter and one digit.
+- **Role**: `admin` or `user`, picked at random (≈50/50). The spec says "role ou admin", which is read as a typo for "user ou admin".
+- **Download.** The response carries `Content-Disposition: attachment; filename="users.json"`, so the browser downloads the file instead of displaying it.
+- **Uniqueness.** Usernames and emails are unique inside one generated file. On import they are lower-cased, and duplicates are checked against both the database and the earlier records of the same file. Each record is validated independently, so one bad record never cancels the others.
+- **Passwords** are hashed with **BCrypt** before storage. The clear password is never stored or returned.
+- **JWT.** HS256, valid for 1 hour. The user's email is both the subject (`sub`) and an `email` claim, plus a `username` claim.
+- **Role checked on every request.** The role is read from the database for each request, not from the token, so a role change applies immediately and a token belonging to a deleted user is rejected.
+- **No username probing.** A non-admin asking for another profile always gets 403, whether that user exists or not.
+- **Zero configuration.** The port, an embedded H2 database, a default JWT secret and a 20 MB upload limit are all in `application.yml`. Spring's default 1 MB would reject files of a few thousand users.
+
+---
+
+## 5. Known limitations
+
+These come either from the spec itself or from the scope of a mini-project:
+
+1. **Anyone can become admin.** `/api/users/generate` and `/api/users/batch` are public (as the spec requires), so anyone can upload a file containing `"role": "admin"` and get full read access. In a real system the import would be restricted to admins.
+2. **The generated file contains clear passwords.** That is the only way to log in afterwards, but the file is sensitive and should not be shared or committed (`users*.json` is in `.gitignore`).
+3. **Data is lost on restart.** The H2 database is in memory. Switching to a file database (`jdbc:h2:file:./data/usersdb`) would keep it.
+4. **No token management.** There is no refresh token, no logout and no revocation. A stolen token stays valid until it expires (1 h). Only a deleted user's token is rejected.
+5. **Default JWT secret.** The app ships with a default secret so it starts without configuration. Anyone who knows it can forge tokens. Override it outside of a demo with the `APP_JWT_SECRET` environment variable (at least 32 characters).
+6. **Import speed.** BCrypt is deliberately slow (about 100 ms per password at the default strength). Importing 10 000 users takes on the order of a few minutes, and the request stays open the whole time. A real system would run large imports asynchronously.
+7. **Size limits.** `count` is capped at 10 000 per call and uploads at 20 MB, to protect memory.
+8. **Usernames "me" and "generate" can't be looked up.** `GET /api/users/me` and `GET /api/users/generate` take priority over `GET /api/users/{username}`, so a user with one of those usernames can't be looked up by username. The generator never produces them.
+9. **No brute-force protection.** There is no rate limiting or lockout on `/api/auth`.
+10. **Missing features.** There is no registration, update, delete or user listing/pagination, because they are out of scope.
+11. **Avatars depend on an external service** (pravatar.cc). If it is down, the URLs still exist but the images won't load.
+12. **Duplicate checks run one record at a time** (two queries per record). That is fine at this scale. Very large imports would need a bulk lookup.
+13. **Concurrent imports.** Two simultaneous uploads containing the same user could race. The database unique constraints still prevent duplicates, but the second upload would then fail as a whole instead of reporting that record.
+
+### Possible next steps
+
+Protect `/batch` (admin only), add refresh tokens, process imports asynchronously, use a file-based H2 database or PostgreSQL, add rate limiting on `/api/auth`, and add the H2 console for inspection.
+
+---
+
+## 6. Tests
+
+- `UserGeneratorServiceTest` (unit, no Spring): count bounds, every field filled, password length 6–10, role values, ISO country codes, ages 18–70, uniqueness, no placeholder content.
+- `UserApiIntegrationTest` (Spring Boot + MockMvc, real security chain):
+  - download header;
+  - generate → import round trip;
+  - BCrypt hashing;
+  - duplicates inside the file and against the database;
+  - invalid records and invalid files;
+  - login with username and with email;
+  - the email inside the JWT;
+  - 401 without a token or with a bad one;
+  - `/me` (no password returned);
+  - user vs admin access to `/{username}` (200/403/404);
+  - public OpenAPI document with the bearer scheme.
+
+---
+
+## 7. Project layout
+
+```
+src/main/java/com/miniprojet/userapi
+├── UserApiApplication.java
+├── config/OpenApiConfig.java          Swagger info + "bearerAuth" scheme (Authorize button)
+├── auth/AuthController.java           POST /api/auth
+├── auth/AuthService.java              username-or-email login
+├── security/SecurityConfig.java       public vs secured routes, BCrypt, JWT encoder/decoder
+├── security/JwtService.java           token creation (email in sub + claim)
+├── security/UserJwtAuthenticationConverter.java   token → user + role from the database
+└── user/
+    ├── UserController.java            generate, batch, me, {username}
+    ├── UserGeneratorService.java      Datafaker generation
+    ├── UserImportService.java         validation, duplicates, hashing, save
+    ├── UserProfileService.java        access rules for profiles
+    ├── AppUser.java / Role.java / UserRepository.java
+    └── UserRecord.java / UserProfile.java / ImportResult.java
+```
